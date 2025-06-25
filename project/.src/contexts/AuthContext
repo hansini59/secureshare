@@ -1,0 +1,185 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { User, AuthState } from '../types';
+
+interface AuthContextType extends AuthState {
+  login: (email: string, password: string, userType: 'ops' | 'client') => Promise<boolean>;
+  logout: () => void;
+  signup: (email: string, password: string, userType: 'ops' | 'client') => Promise<{ success: boolean; message?: string; verificationUrl?: string }>;
+  verifyEmail: (token: string) => Promise<boolean>;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+// Mock user database
+const mockUsers: { [key: string]: User & { password: string; isVerified: boolean } } = {
+  'ops@company.com': {
+    id: 'ops-1',
+    email: 'ops@company.com',
+    password: 'password123',
+    type: 'ops',
+    isVerified: true,
+    createdAt: new Date().toISOString(),
+  },
+  'client@company.com': {
+    id: 'client-1',
+    email: 'client@company.com',
+    password: 'password123',
+    type: 'client',
+    isVerified: true,
+    createdAt: new Date().toISOString(),
+  },
+};
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [authState, setAuthState] = useState<AuthState>({
+    user: null,
+    isAuthenticated: false,
+    isLoading: true,
+  });
+
+  useEffect(() => {
+    // Check for stored user session
+    const storedUser = localStorage.getItem('user');
+    if (storedUser) {
+      try {
+        const user = JSON.parse(storedUser);
+        setAuthState({
+          user,
+          isAuthenticated: true,
+          isLoading: false,
+        });
+      } catch (error) {
+        localStorage.removeItem('user');
+        setAuthState(prev => ({ ...prev, isLoading: false }));
+      }
+    } else {
+      setAuthState(prev => ({ ...prev, isLoading: false }));
+    }
+  }, []);
+
+  const login = async (email: string, password: string, userType: 'ops' | 'client'): Promise<boolean> => {
+    setAuthState(prev => ({ ...prev, isLoading: true }));
+    
+    // Simulate API call delay
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Check if user exists in mock database
+    const existingUser = mockUsers[email];
+    
+    if (existingUser && existingUser.password === password && existingUser.type === userType) {
+      if (!existingUser.isVerified) {
+        setAuthState(prev => ({ ...prev, isLoading: false }));
+        return false;
+      }
+
+      const user: User = {
+        id: existingUser.id,
+        email: existingUser.email,
+        type: existingUser.type,
+        isVerified: existingUser.isVerified,
+        createdAt: existingUser.createdAt,
+      };
+
+      localStorage.setItem('user', JSON.stringify(user));
+      setAuthState({
+        user,
+        isAuthenticated: true,
+        isLoading: false,
+      });
+
+      return true;
+    }
+
+    setAuthState(prev => ({ ...prev, isLoading: false }));
+    return false;
+  };
+
+  const logout = () => {
+    localStorage.removeItem('user');
+    setAuthState({
+      user: null,
+      isAuthenticated: false,
+      isLoading: false,
+    });
+  };
+
+  const signup = async (email: string, password: string, userType: 'ops' | 'client') => {
+    setAuthState(prev => ({ ...prev, isLoading: true }));
+    
+    // Simulate API call delay
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    // Check if user already exists
+    if (mockUsers[email]) {
+      setAuthState(prev => ({ ...prev, isLoading: false }));
+      return {
+        success: false,
+        message: 'User with this email already exists',
+      };
+    }
+
+    // Create new user
+    const newUser = {
+      id: Math.random().toString(36).substr(2, 9),
+      email,
+      password,
+      type: userType,
+      isVerified: true, // Auto-verify for demo purposes
+      createdAt: new Date().toISOString(),
+    };
+
+    // Add to mock database
+    mockUsers[email] = newUser;
+    
+    const verificationUrl = `${window.location.origin}/verify-email?token=${btoa(email)}`;
+    
+    setAuthState(prev => ({ ...prev, isLoading: false }));
+    
+    return {
+      success: true,
+      message: 'Account created successfully! You can now log in.',
+      verificationUrl,
+    };
+  };
+
+  const verifyEmail = async (token: string): Promise<boolean> => {
+    setAuthState(prev => ({ ...prev, isLoading: true }));
+    
+    // Simulate API call delay
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    try {
+      const email = atob(token);
+      if (mockUsers[email]) {
+        mockUsers[email].isVerified = true;
+        setAuthState(prev => ({ ...prev, isLoading: false }));
+        return true;
+      }
+    } catch (error) {
+      // Invalid token
+    }
+    
+    setAuthState(prev => ({ ...prev, isLoading: false }));
+    return false;
+  };
+
+  return (
+    <AuthContext.Provider value={{
+      ...authState,
+      login,
+      logout,
+      signup,
+      verifyEmail,
+    }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
