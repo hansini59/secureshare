@@ -1,0 +1,492 @@
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File as FastAPIFile
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+import os
+import shutil
+from pathlib import Path
+from typing import Optional
+import uuid
+
+# Configuration
+SECRET_KEY = "your-secret-key-here-change-in-production"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+UPLOAD_DIRECTORY = "uploads"
+
+# Create upload directory if it doesn't exist
+Path(UPLOAD_DIRECTORY).mkdir(exist_ok=True)
+
+# Database setup
+SQLITE_DATABASE_URL = "sqlite:///./secure_file_sharing.db"
+engine = create_engine(SQLITE_DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# JWT Security
+security = HTTPBearer()
+
+app = FastAPI(title="Secure File Sharing API", version="1.0.0")
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Database Models
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    user_type = Column(String, nullable=False)  # 'ops' or 'client'
+    is_verified = Column(Boolean, default=True)  # Auto-verify for demo
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship
+    uploaded_files = relationship("UploadedFile", back_populates="uploader")
+
+class UploadedFile(Base):
+    __tablename__ = "uploaded_files"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String, nullable=False)
+    original_filename = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    file_size = Column(Integer, nullable=False)
+    content_type = Column(String, nullable=False)
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship
+    uploader = relationship("User", back_populates="uploaded_files")
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# Dependency to get database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Utility functions
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def create_download_token(file_id: int, user_id: int, expires_delta: Optional[timedelta] = None):
+    """Create a secure token for file download"""
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=30)  # Token expires in 30 minutes
+    
+    expire = datetime.utcnow() + expires_delta
+    to_encode = {
+        "file_id": file_id,
+        "user_id": user_id,
+        "exp": expire,
+        "type": "download"
+    }
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_download_token(token: str):
+    """Verify and decode download token"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        file_id: int = payload.get("file_id")
+        user_id: int = payload.get("user_id")
+        token_type: str = payload.get("type")
+        
+        if file_id is None or user_id is None or token_type != "download":
+            return None
+        
+        return {"file_id": file_id, "user_id": user_id}
+    except JWTError:
+        return None
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    """Get current authenticated user"""
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+# Pydantic models for request/response
+from pydantic import BaseModel
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    user_type: str
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+    user_type: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class FileInfo(BaseModel):
+    id: int
+    filename: str
+    original_filename: str
+    file_size: int
+    content_type: str
+    uploaded_by: str
+    uploaded_at: datetime
+
+class DownloadResponse(BaseModel):
+    download_link: str
+    expires_at: datetime
+    message: str
+
+# API Endpoints
+
+@app.post("/api/auth/signup", response_model=dict)
+async def signup(user_data: UserCreate, db: Session = Depends(get_db)):
+    """Sign up a new user"""
+    # Check if user already exists
+    existing_user = db.query(User).filter(User.email == user_data.email).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Validate user type
+    if user_data.user_type not in ["ops", "client"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user type. Must be 'ops' or 'client'"
+        )
+    
+    # Create new user
+    hashed_password = get_password_hash(user_data.password)
+    db_user = User(
+        email=user_data.email,
+        hashed_password=hashed_password,
+        user_type=user_data.user_type,
+        is_verified=True  # Auto-verify for demo
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    return {
+        "success": True,
+        "message": "Account created successfully! You can now log in.",
+        "user_id": db_user.id
+    }
+
+@app.post("/api/auth/login", response_model=Token)
+async def login(user_data: UserLogin, db: Session = Depends(get_db)):
+    """Login user and return access token"""
+    user = db.query(User).filter(
+        User.email == user_data.email,
+        User.user_type == user_data.user_type
+    ).first()
+    
+    if not user or not verify_password(user_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email, password, or user type",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email not verified"
+        )
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email, "user_type": user.user_type, "user_id": user.id},
+        expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/api/files/upload")
+async def upload_file(
+    file: UploadFile = FastAPIFile(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Upload file (Operations users only)"""
+    # Check if user is operations user
+    if current_user.user_type != "ops":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only operations users can upload files"
+        )
+    
+    # Validate file type
+    allowed_types = [
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # pptx
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",    # docx
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"          # xlsx
+    ]
+    
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PPTX, DOCX, and XLSX files are allowed"
+        )
+    
+    # Generate unique filename
+    file_extension = file.filename.split('.')[-1]
+    unique_filename = f"{uuid.uuid4()}.{file_extension}"
+    file_path = os.path.join(UPLOAD_DIRECTORY, unique_filename)
+    
+    # Save file
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save file: {str(e)}"
+        )
+    
+    # Save file info to database
+    db_file = UploadedFile(
+        filename=unique_filename,
+        original_filename=file.filename,
+        file_path=file_path,
+        file_size=file.size,
+        content_type=file.content_type,
+        uploaded_by=current_user.id
+    )
+    
+    db.add(db_file)
+    db.commit()
+    db.refresh(db_file)
+    
+    return {
+        "success": True,
+        "message": "File uploaded successfully",
+        "file_id": db_file.id,
+        "filename": file.filename
+    }
+
+@app.get("/api/files/list")
+async def list_files(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """List all uploaded files (Client users only)"""
+    if current_user.user_type != "client":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only client users can list files"
+        )
+    
+    files = db.query(UploadedFile).join(User).all()
+    
+    file_list = []
+    for file in files:
+        file_list.append({
+            "id": file.id,
+            "name": file.original_filename,
+            "type": file.content_type,
+            "size": file.file_size,
+            "uploadedBy": file.uploader.email,
+            "uploadedAt": file.uploaded_at.isoformat()
+        })
+    
+    return {
+        "success": True,
+        "data": {
+            "files": file_list,
+            "total_count": len(file_list),
+            "last_updated": datetime.utcnow().isoformat(),
+            "real_time": True
+        },
+        "message": "Files retrieved successfully"
+    }
+
+@app.get("/api/files/download/{file_id}")
+async def generate_download_link(
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Generate secure download link (Client users only)"""
+    if current_user.user_type != "client":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only client users can download files"
+        )
+    
+    # Check if file exists
+    file = db.query(UploadedFile).filter(UploadedFile.id == file_id).first()
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    # Generate secure download token
+    download_token = create_download_token(file_id, current_user.id)
+    expires_at = datetime.utcnow() + timedelta(minutes=30)
+    
+    return {
+        "success": True,
+        "data": {
+            "download_link": f"/api/secure-download/{download_token}",
+            "expires_at": expires_at.isoformat(),
+            "generated_at": datetime.utcnow().isoformat()
+        },
+        "message": "Download link generated successfully"
+    }
+
+@app.get("/api/secure-download/{token}")
+async def secure_download(token: str, db: Session = Depends(get_db)):
+    """
+    Secure file download endpoint with encrypted token verification
+    
+    - Accepts a secure, encrypted token as a path parameter
+    - Verifies the token using JWT
+    - Token contains file_id and user_id
+    - Checks if user has 'Client User' role
+    - Returns file as download with proper headers
+    - Returns 403 if token is invalid, expired, or user is not a client
+    """
+    
+    # Verify and decode the download token
+    token_data = verify_download_token(token)
+    if not token_data:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid or expired download token"
+        )
+    
+    file_id = token_data["file_id"]
+    user_id = token_data["user_id"]
+    
+    # Get user from database and verify they are a client user
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User not found"
+        )
+    
+    if user.user_type != "client":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. Only client users can download files"
+        )
+    
+    # Fetch file from database using file_id
+    file_record = db.query(UploadedFile).filter(UploadedFile.id == file_id).first()
+    if not file_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    # Check if file exists on disk
+    if not os.path.exists(file_record.file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found on server"
+        )
+    
+    # Return file as download with proper headers
+    return FileResponse(
+        path=file_record.file_path,
+        filename=file_record.original_filename,
+        media_type=file_record.content_type,
+        headers={
+            "Content-Disposition": f"attachment; filename={file_record.original_filename}"
+        }
+    )
+
+@app.get("/api/stats/live")
+async def get_live_stats(db: Session = Depends(get_db)):
+    """Get live statistics for dashboard"""
+    total_files = db.query(UploadedFile).count()
+    total_users = db.query(User).count()
+    
+    return {
+        "success": True,
+        "data": {
+            "total_files": total_files,
+            "total_downloads": total_files * 3,  # Mock data
+            "active_users": total_users,
+            "recent_activity": total_files + 5,  # Mock data
+            "last_updated": datetime.utcnow().isoformat()
+        },
+        "message": "Live statistics retrieved"
+    }
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Secure File Sharing API",
+        "version": "1.0.0",
+        "endpoints": {
+            "auth": ["/api/auth/signup", "/api/auth/login"],
+            "files": ["/api/files/upload", "/api/files/list", "/api/files/download/{file_id}"],
+            "secure": ["/api/secure-download/{token}"],
+            "stats": ["/api/stats/live"]
+        }
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
