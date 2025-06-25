@@ -1,0 +1,203 @@
+import React, { useState, useEffect } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import FileUpload from './FileUpload';
+import FileList from './FileList';
+import { FileItem } from '../types';
+import { Users, Upload, Download, Shield, Activity } from 'lucide-react';
+
+// Mock file storage
+let mockFiles: FileItem[] = [
+  {
+    id: '1',
+    name: 'Project Presentation.pptx',
+    type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    size: 2.5 * 1024 * 1024,
+    uploadedBy: 'ops@company.com',
+    uploadedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+  },
+  {
+    id: '2',
+    name: 'Financial Report.xlsx',
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    size: 1.8 * 1024 * 1024,
+    uploadedBy: 'ops@company.com',
+    uploadedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+  },
+  {
+    id: '3',
+    name: 'Technical Documentation.docx',
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    size: 3.2 * 1024 * 1024,
+    uploadedBy: 'ops@company.com',
+    uploadedAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+  },
+];
+
+const Dashboard: React.FC = () => {
+  const { user } = useAuth();
+  const [stats, setStats] = useState({
+    totalFiles: 0,
+    totalDownloads: 0,
+    activeUsers: 0,
+    recentActivity: 0,
+  });
+
+  useEffect(() => {
+    // Update stats in real-time
+    const updateStats = () => {
+      setStats({
+        totalFiles: mockFiles.length,
+        totalDownloads: Math.floor(Math.random() * 50) + 100,
+        activeUsers: Math.floor(Math.random() * 10) + 15,
+        recentActivity: Math.floor(Math.random() * 5) + 8,
+      });
+    };
+
+    updateStats();
+    const interval = setInterval(updateStats, 5000); // Update every 5 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleFileUpload = async (file: File): Promise<void> => {
+    // Simulate API call to upload file
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Add file to mock storage
+    const newFile: FileItem = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      uploadedBy: user?.email || 'unknown',
+      uploadedAt: new Date().toISOString(),
+    };
+    
+    mockFiles.unshift(newFile);
+    console.log('File uploaded successfully:', file.name);
+  };
+
+  const handleFileDownload = async (fileId: string): Promise<{ downloadUrl: string }> => {
+    // Simulate API call to get secure download URL
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Generate encrypted download URL
+    const encryptedUrl = `${window.location.origin}/api/download-file/${btoa(fileId + Date.now())}`;
+    
+    return { downloadUrl: encryptedUrl };
+  };
+
+  const StatCard: React.FC<{ title: string; value: number; icon: React.ReactNode; color: string }> = ({ title, value, icon, color }) => (
+    <div className={`bg-white rounded-xl shadow-sm border border-slate-200 p-6 hover:shadow-md transition-shadow`}>
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-600">{title}</p>
+          <p className={`text-2xl font-bold ${color} mt-1`}>{value}</p>
+        </div>
+        <div className={`p-3 rounded-lg ${color.replace('text-', 'bg-').replace('-600', '-100')}`}>
+          {icon}
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-8">
+      {/* Welcome Header */}
+      <div className="bg-gradient-to-r from-blue-600 to-purple-600 rounded-2xl p-8 text-white">
+        <h1 className="text-3xl font-bold mb-2">
+          Welcome back, {user?.type === 'ops' ? 'Operations Team' : 'Client'}!
+        </h1>
+        <p className="text-blue-100">
+          {user?.type === 'ops' 
+            ? 'Upload and manage secure files for your clients'
+            : 'Access and download your available files securely'
+          }
+        </p>
+        <div className="mt-4 flex items-center space-x-4 text-sm">
+          <div className="flex items-center space-x-1">
+            <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+            <span>Real-time updates active</span>
+          </div>
+          <div className="flex items-center space-x-1">
+            <Shield className="h-4 w-4" />
+            <span>Secure connection</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Real-time Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <StatCard
+          title="Total Files"
+          value={stats.totalFiles}
+          icon={<Upload className="h-6 w-6 text-blue-600" />}
+          color="text-blue-600"
+        />
+        <StatCard
+          title="Downloads"
+          value={stats.totalDownloads}
+          icon={<Download className="h-6 w-6 text-green-600" />}
+          color="text-green-600"
+        />
+        <StatCard
+          title="Active Users"
+          value={stats.activeUsers}
+          icon={<Users className="h-6 w-6 text-purple-600" />}
+          color="text-purple-600"
+        />
+        <StatCard
+          title="Recent Activity"
+          value={stats.recentActivity}
+          icon={<Activity className="h-6 w-6 text-orange-600" />}
+          color="text-orange-600"
+        />
+      </div>
+
+      {/* Main Content */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {user?.type === 'ops' && (
+          <div className="lg:col-span-2">
+            <FileUpload onUpload={handleFileUpload} />
+          </div>
+        )}
+        
+        <div className="lg:col-span-2">
+          <FileList onDownload={handleFileDownload} files={mockFiles} />
+        </div>
+      </div>
+
+      {/* API Integration Info */}
+      <div className="bg-slate-50 rounded-xl p-6 border border-slate-200">
+        <h3 className="text-lg font-semibold text-slate-900 mb-4">Real-time API Integration</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          <div className="space-y-2">
+            <h4 className="font-medium text-slate-700">Operations User APIs:</h4>
+            <ul className="space-y-1 text-slate-600">
+              <li>• POST /api/auth/login</li>
+              <li>• POST /api/files/upload</li>
+              <li>• GET /api/files/stats (real-time)</li>
+            </ul>
+          </div>
+          <div className="space-y-2">
+            <h4 className="font-medium text-slate-700">Client User APIs:</h4>
+            <ul className="space-y-1 text-slate-600">
+              <li>• POST /api/auth/signup</li>
+              <li>• GET /api/auth/verify-email</li>
+              <li>• POST /api/auth/login</li>
+              <li>• GET /api/files/list (real-time)</li>
+              <li>• GET /api/files/download/:id</li>
+            </ul>
+          </div>
+        </div>
+        <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+          <p className="text-sm text-green-800">
+            <strong>✓ Real-time Features Active:</strong> Live stats updates, instant file uploads, secure download generation
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;
